@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from model_validation.train import DEFAULTS, DEFAULT_MAT_FILES, TrainSettings
-from model_validation.tune import make_pruner, make_sampler, run_optuna
+from train import DEFAULTS, DEFAULT_MAT_FILES, TrainSettings
+from tune import make_pruner, make_sampler, run_optuna
 
 
 BASE_TUNE_SETTINGS = TrainSettings(

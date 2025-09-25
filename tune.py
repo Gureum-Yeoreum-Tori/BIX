@@ -8,12 +8,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import optuna
 
-ROOT = Path(__file__).resolve().parent
-if __package__ is None or __package__ == "":
-    sys.path.append(str(ROOT.parent))
-    from model_validation.train import DEFAULTS, DEFAULT_MAT_FILES, TrainSettings, run_training
-else:
-    from .train import DEFAULTS, DEFAULT_MAT_FILES, TrainSettings, run_training
+from train import DEFAULTS, DEFAULT_MAT_FILES, TrainSettings, run_training
 
 
 def first_value(values: Sequence, default):

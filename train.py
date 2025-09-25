@@ -19,12 +19,7 @@ from torch import Tensor, nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Subset, TensorDataset
 
-ROOT = Path(__file__).resolve().parent
-if __package__ is None or __package__ == "":
-    sys.path.append(str(ROOT.parent))
-    from model_validation.models import MultiHeadMLP, MLP, DeepONet
-else:
-    from .models import MultiHeadMLP, MLP, DeepONet
+from models import MultiHeadMLP, MLP, DeepONet
 
 
 DEFAULT_MAT_FILES = (
