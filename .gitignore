@@ -1,9 +1,9 @@
 # no dataset dir
-/dataset
-/checkpoints
-/result
+# /dataset
+# /checkpoints
+# /result
 
-*.png
+# *.png
 
 # DS_Store
 .DS_Store
