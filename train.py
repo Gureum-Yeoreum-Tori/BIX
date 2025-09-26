@@ -1,3 +1,4 @@
+#%%
 import argparse
 import json
 import math
@@ -21,60 +22,50 @@ from torch.utils.data import DataLoader, Subset, TensorDataset
 
 from models import MultiHeadMLP, MLP, DeepONet
 
-
-DEFAULT_MAT_FILES = (
-    "20250908_T_182846",
-    # "20250911_T_091324",
-    # "20250908_T_183632",
-    # "20250908_T_203220",
-)
-
 DEFAULTS = {
     "deeponet": {
         "batch_size": 512,
         "epochs": 5000,
         "lr": 1e-4,
         "weight_decay": 1e-6,
-        "hidden_layers": [64, 64, 64, 64, 64, 64, 64, 64],  # 8 layers
+        "hidden_layers": [64, 64, 64, 64],
         "param_embedding_dim": 64,
         "dropout": 0.0,
-        "n_basis": 64,
+        "n_basis": 32,
         "warmup": 500,
-        "patience": 100,
+        "patience": 200,
         "grad_clip": 0.0,
+        "head_names": None,
     },
     "mlp": {
-        "batch_size": 256,
+        "batch_size": 512,
         "epochs": 3000,
         "lr": 1e-4,
         "weight_decay": 1e-6,
-        "hidden_layers": [64, 64, 64, 64],  # 4 layers
+        "hidden_layers": [64, 64, 64],
         "param_embedding_dim": 0,
         "dropout": 0.0,
         "n_basis": 0,
         "warmup": 0,
-        "patience": 100,
-        "grad_clip": 1.0,
+        "patience": 200,
+        "grad_clip": 0.0,
+        "head_names": None,
     },
 }
 
 @dataclass
 class TrainSettings:
     model: str
-    target: str
     data_dir: str
     mat_files: Sequence[str]
-    leak_index: int = 6
-    rdc_indices: Sequence[int] = (4, 5, 2, 3)
     batch_size: int = 256
     epochs: int = 100
-    lr: float = 1e-3
+    lr: float = 1e-4
     weight_decay: float = 0.0
     activation: str = "relu"
     hidden_layers: Sequence[int] = field(default_factory=lambda: [64, 64, 64, 64])
     branch_layers: Sequence[int] = field(default_factory=lambda: [64, 64, 64])
     trunk_layers: Sequence[int] = field(default_factory=lambda: [64, 64, 64])
-    rdc_indices: Sequence[int] = field(default_factory=lambda: (2, 3, 4, 5))
     head_names: Optional[Sequence[str]] = None
     param_embedding_dim: int = 64
     dropout: float = 0.0
@@ -111,23 +102,20 @@ class EarlyStopping:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Seal dataset training")
+    parser = argparse.ArgumentParser(description="Bearing dataset training")
     parser.add_argument("--model", choices=["deeponet", "mlp", "baseline"], default="deeponet")
-    parser.add_argument("--target", choices=["rdc", "leak"], default="rdc")
-    parser.add_argument("--mat-files", nargs="*", default=list(DEFAULT_MAT_FILES))
-    parser.add_argument("--data-dir", default="dataset/data/tapered_seal")
+    parser.add_argument("--mat-files", nargs="*")
+    parser.add_argument("--data-dir", default="dataset/jb")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight-decay", type=float)
-    parser.add_argument("--hidden-layers", nargs="*", type=int)   # 리스트로 받음
+    parser.add_argument("--hidden-layers", nargs="*", type=int)
     parser.add_argument("--branch-layers", nargs="*", type=int)
     parser.add_argument("--trunk-layers", nargs="*", type=int)
     parser.add_argument("--param-embedding-dim", type=int)
     parser.add_argument("--dropout", type=float)
     parser.add_argument("--n-basis", type=int)
-    parser.add_argument("--leak-index", type=int)
-    parser.add_argument("--rdc-indices", nargs="*", type=int)
     parser.add_argument("--warmup", type=int)
     parser.add_argument("--patience", type=int)
     parser.add_argument("--grad-clip", type=float)
@@ -136,7 +124,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir")
     parser.add_argument("--exp-name")
     parser.add_argument("--baseline-alpha", type=float)
-    parser.add_argument("--head-names")
+    parser.add_argument(
+        "--head-names",
+        nargs="*",
+        help="Optional names for each prediction head (e.g., --head-names K k C c)",
+    )
     return parser.parse_args()
 
 
@@ -176,48 +168,74 @@ def initialize_weights(model: nn.Module, init: str) -> None:
     model.apply(_init)
 
 
-def load_rdc(data_dir: str, mat_files: Sequence[str], rdc_indices: Sequence[int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_dataset(
+    data_dir: str,
+    mat_files: Sequence[str],
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[Sequence[str]]]:
+    """Load prepackaged datasets containing x (features), y (targets), and optional grid."""
+
     features: List[np.ndarray] = []
     targets: List[np.ndarray] = []
-    grid_norm: Optional[np.ndarray] = None
-    grid_raw: Optional[np.ndarray] = None
+    grid: Optional[np.ndarray] = None
+    head_names: Optional[List[str]] = None
+
+    def _decode_head_names(raw: np.ndarray) -> List[str]:
+        names: List[str] = []
+        for entry in raw.reshape(-1):
+            if isinstance(entry, bytes):
+                names.append(entry.decode("utf-8"))
+            elif hasattr(entry, "item"):
+                value = entry.item()
+                if isinstance(value, bytes):
+                    names.append(value.decode("utf-8"))
+                else:
+                    names.append(str(value))
+            else:
+                names.append(str(entry))
+        return names
+
     for name in mat_files:
         path = os.path.join(data_dir, name, "dataset.mat")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Dataset not found: {path}")
+
         with h5py.File(path, "r") as mat:
-            inputs = np.array(mat["input"], dtype=np.float32)
-            rdc = np.array(mat["RDC"], dtype=np.float32)
-            w_vec = np.array(mat["params/wVec"], dtype=np.float32).squeeze()
-        sel = rdc[list(rdc_indices), :, :]
-        features.append(inputs.T)
-        targets.append(sel.transpose(2, 0, 1))
-        if grid_norm is None:
-            w = w_vec
-            w_norm = 2.0 * (w - w.min()) / (w.max() - w.min()) - 1.0
-            grid_norm = w_norm[:, None].astype(np.float32)
-            grid_raw = w[:, None].astype(np.float32)
+            if "x" not in mat or "y" not in mat:
+                raise KeyError(f"Expected datasets 'x' and 'y' in {path}")
+
+            raw_X = np.array(mat["x"], dtype=np.float32).transpose([1,0]) # n_data, n_in
+            raw_Y = np.array(mat["y"], dtype=np.float32).transpose([3,1,2,0]) # n_data, n_grid1, n_grid2, n_out
+            gx = np.array(mat["grid"]["x"], dtype=np.float32) # n_grid1, n_grid2
+            gy = np.array(mat["grid"]["y"], dtype=np.float32) # n_grid1, n_grid2
+            grid = np.stack([gx, gy], axis=2)
+            
+            if raw_X.shape[0] != raw_Y.shape[0]:
+                raise ValueError(
+                    f"Sample dimension mismatch between x ({raw_X.shape}) and y ({raw_Y.shape}) in {path}"
+                )
+
+            features.append(raw_X.astype(np.float32))
+            targets.append(raw_Y.astype(np.float32))
+
+            if head_names is None and "head_names" in mat:
+                raw_names = np.array(mat["head_names"])
+                try:
+                    head_names = _decode_head_names(raw_names)
+                except Exception:  # noqa: BLE001
+                    head_names = None
+
+            if gx.shape[0] != raw_Y.shape[1] and gx.shape[1] != raw_Y.shape[2]:
+                raise ValueError(f"Grid and data dimension mismatch.")
+
     if not features:
-        raise RuntimeError("No data loaded for RDC")
+        raise RuntimeError("No data loaded; check mat_files configuration")
+
     X = np.concatenate(features, axis=0)
     Y = np.concatenate(targets, axis=0)
-    return X, Y, grid_norm, grid_raw
+    grid = grid.reshape(-1, 2)
+    Y = Y.reshape(2000, -1, Y.shape[-1])
 
-
-def load_leak(data_dir: str, mat_files: Sequence[str], leak_index: int) -> Tuple[np.ndarray, np.ndarray]:
-    features: List[np.ndarray] = []
-    targets: List[np.ndarray] = []
-    for name in mat_files:
-        path = os.path.join(data_dir, name, "dataset.mat")
-        with h5py.File(path, "r") as mat:
-            inputs = np.array(mat["input"], dtype=np.float32)
-            leak = np.array(mat["Leak"], dtype=np.float32)
-        features.append(inputs.T)
-        targets.append(leak[leak_index, :].reshape(-1, 1))
-    if not features:
-        raise RuntimeError("No data loaded for Leak")
-    X = np.concatenate(features, axis=0)
-    y = np.concatenate(targets, axis=0)
-    return X, y
-
+    return X, Y, grid, head_names
 
 def split_indices(n: int, seed: int, splits: Tuple[float, float, float] = (0.7, 0.15, 0.15)) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not math.isclose(sum(splits), 1.0, rel_tol=1e-6):
@@ -239,7 +257,7 @@ def scale_inputs(X: np.ndarray, train_idx: np.ndarray) -> Tuple[np.ndarray, Stan
     return X_scaled, scaler
 
 
-def scale_targets_rdc(Y: np.ndarray, train_idx: np.ndarray) -> Tuple[np.ndarray, List[StandardScaler]]:
+def scale_outputs(Y: np.ndarray, train_idx: np.ndarray) -> Tuple[np.ndarray, List[StandardScaler]]:
     n_heads = Y.shape[1]
     scalers: List[StandardScaler] = []
     Y_scaled = np.empty_like(Y, dtype=np.float32)
@@ -249,12 +267,6 @@ def scale_targets_rdc(Y: np.ndarray, train_idx: np.ndarray) -> Tuple[np.ndarray,
         Y_scaled[:, head, :] = transformed.astype(np.float32)
         scalers.append(scaler)
     return Y_scaled, scalers
-
-
-def scale_targets_leak(y: np.ndarray, train_idx: np.ndarray) -> Tuple[np.ndarray, StandardScaler]:
-    scaler = StandardScaler().fit(y[train_idx])
-    y_scaled = scaler.transform(y).astype(np.float32)
-    return y_scaled, scaler
 
 
 def make_loaders(dataset: TensorDataset, train_idx: np.ndarray, val_idx: np.ndarray, test_idx: np.ndarray, batch_size: int) -> Dict[str, DataLoader]:
@@ -337,7 +349,7 @@ def collect_predictions(model: nn.Module, loader: DataLoader, device: torch.devi
     return np.concatenate(outputs, axis=0)
 
 
-def inverse_scale_rdc(arr: np.ndarray, scalers: Sequence[StandardScaler]) -> np.ndarray:
+def inverse_scale(arr: np.ndarray, scalers: Sequence[StandardScaler]) -> np.ndarray:
     n_samples, n_heads, n_points = arr.shape
     restored = np.empty_like(arr)
     for head, scaler in enumerate(scalers):
@@ -398,7 +410,6 @@ def serialize_scalers_list(scalers: Sequence[StandardScaler]) -> Dict[str, List[
 def save_checkpoint(path: Path, model: nn.Module, settings: TrainSettings, scalers: Dict[str, Union[Dict[str, List[float]], Dict[str, List[List[float]]]]], splits: Dict[str, List[int]], history: Dict[str, List[float]], metrics: Dict[str, Dict[str, float]], grid_info: Optional[Dict[str, List[float]]]) -> None:
     payload = {
         "model": settings.model,
-        "target": settings.target,
         "state_dict": model.state_dict(),
         "settings": asdict(settings),
         "scalers": scalers,
@@ -416,13 +427,8 @@ def build_settings(args: argparse.Namespace) -> TrainSettings:
 
     settings = TrainSettings(
         model=args.model,
-        target=args.target,
         data_dir=args.data_dir,
-        mat_files=tuple(args.mat_files) if args.mat_files else tuple(DEFAULT_MAT_FILES),
-
-        leak_index=args.leak_index if args.leak_index is not None else 6,
-        rdc_indices=tuple(args.rdc_indices) if args.rdc_indices else (2, 3, 4, 5),
-
+        mat_files=tuple(args.mat_files),
         batch_size=args.batch_size or base.get("batch_size", 256),
         epochs=args.epochs or base.get("epochs", 100),
         lr=args.lr or base.get("lr", 1e-3),
@@ -446,41 +452,19 @@ def build_settings(args: argparse.Namespace) -> TrainSettings:
         exp_name=args.exp_name or base.get("exp_name", None),
 
         baseline_alpha=args.baseline_alpha if args.baseline_alpha is not None else base.get("baseline_alpha", 1.0),
-        head_names=tuple(args.head_names) if args.head_names else tuple(base.get("head_names", ("K","k","C","c"))),
+        head_names=(
+            tuple(args.head_names)
+            if args.head_names not in (None, [])
+            else (
+                tuple(base.get("head_names"))
+                if base.get("head_names")
+                else None
+            )
+        ),
     )
     return settings
 
-
-# def build_settings(args: argparse.Namespace) -> TrainSettings:
-#     base = DEFAULTS[args.model]
-#     settings = TrainSettings(
-#         model=args.model,
-#         target=args.target,
-#         data_dir=args.data_dir,
-#         mat_files=tuple(args.mat_files) if args.mat_files else DEFAULT_MAT_FILES,
-#         leak_index=args.leak_index if args.leak_index is not None else 6,
-#         rdc_indices=tuple(args.rdc_indices) if args.rdc_indices else (2, 3, 4, 5),
-#         batch_size=args.batch_size or base["batch_size"],
-#         epochs=args.epochs or base["epochs"],
-#         lr=args.lr or base["lr"],
-#         weight_decay=args.weight_decay if args.weight_decay is not None else base["weight_decay"],
-#         hidden_channels=args.hidden_channels or base["hidden_channels"],
-#         param_embedding_dim=args.param_embedding or base["param_embedding_dim"],
-#         n_layers=args.layers or base["n_layers"],
-#         dropout=args.dropout if args.dropout is not None else base["dropout"],
-#         n_basis=args.n_basis or base["n_basis"],
-#         warmup=args.warmup if args.warmup is not None else base["warmup"],
-#         patience=args.patience if args.patience is not None else base["patience"],
-#         grad_clip=args.grad_clip if args.grad_clip is not None else base["grad_clip"],
-#         seed=args.seed or 42,
-#         device=args.device,
-#         out_dir=args.out_dir or "net",
-#         exp_name=args.exp_name,
-#         baseline_alpha=args.baseline_alpha if args.baseline_alpha is not None else 1.0,
-#     )
-#     return settings
-
-
+#%%
 def build_model(
     settings: TrainSettings,
     input_dim: int,
@@ -578,60 +562,52 @@ def run_training(settings: TrainSettings) -> Dict[str, Union[float, str, Dict[st
     set_seed(settings.seed)
     device = get_device(settings.device)
 
-    if settings.target == "rdc":
-        X, Y, grid_norm, grid_raw = load_rdc(settings.data_dir, settings.mat_files, settings.rdc_indices)
-        train_idx, val_idx, test_idx = split_indices(X.shape[0], settings.seed)
-        X_scaled, scaler_X = scale_inputs(X, train_idx)
-        Y_scaled, scalers_y = scale_targets_rdc(Y, train_idx)
-        tensor_X = torch.from_numpy(X_scaled)
-        tensor_Y = torch.from_numpy(Y_scaled)
-        dataset = TensorDataset(tensor_X, tensor_Y)
-        loaders = make_loaders(dataset, train_idx, val_idx, test_idx, settings.batch_size)
-        criterion = nn.MSELoss()
-        if settings.head_names:
-            head_names = tuple(settings.head_names)
-            if len(head_names) != Y.shape[1]:
-                raise ValueError("Number of head names must match RDC target dimension")
-        else:
-            head_names = None
-        grid_tensor = torch.from_numpy(grid_norm).to(device)
-        model = build_model(
-            settings,
-            input_dim=X.shape[1],
-            output_dim=Y.shape[1],
-            head_names=head_names,
-            trunk_input_dim=grid_tensor.shape[-1],
-        )
-        grid_info = {
-            "normalized": grid_norm.flatten().astype(float).tolist(),
-            "original": grid_raw.flatten().astype(float).tolist(),
-        }
-        scalers_serialized = {
-            "X": serialize_scaler(scaler_X),
-            "Y": serialize_scalers_list(scalers_y),
-        }
-    else:
-        X, y = load_leak(settings.data_dir, settings.mat_files, settings.leak_index)
-        train_idx, val_idx, test_idx = split_indices(X.shape[0], settings.seed)
-        X_scaled, scaler_X = scale_inputs(X, train_idx)
-        y_scaled, scaler_y = scale_targets_leak(y, train_idx)
-        tensor_X = torch.from_numpy(X_scaled)
-        tensor_y = torch.from_numpy(y_scaled)
-        dataset = TensorDataset(tensor_X, tensor_y)
-        loaders = make_loaders(dataset, train_idx, val_idx, test_idx, settings.batch_size)
-        criterion = nn.MSELoss()
-        model = build_model(
-            settings,
-            input_dim=X.shape[1],
-            output_dim=y.shape[1],
-        )
-        grid_tensor = None
-        grid_info = None
-        scalers_serialized = {
-            "X": serialize_scaler(scaler_X),
-            "y": serialize_scaler(scaler_y),
-        }
+    X, Y, grid_raw, dataset_head_names = load_dataset(settings.data_dir, settings.mat_files)
+    head_names: Optional[Sequence[str]] = None
     
+    grid_raw = grid_raw.astype(np.float32)
+    if grid_raw.ndim == 1:
+        grid_raw = grid_raw[:, None]
+    grid_min = grid_raw.min(axis=0, keepdims=True)
+    grid_max = grid_raw.max(axis=0, keepdims=True)
+    denom = np.where(grid_max > grid_min, grid_max - grid_min, 1.0)
+    grid_norm = 2.0 * (grid_raw - grid_min) / denom - 1.0
+
+    train_idx, val_idx, test_idx = split_indices(X.shape[0], settings.seed)
+    X_scaled, scaler_X = scale_inputs(X, train_idx)
+    Y_scaled, scalers_y = scale_outputs(Y, train_idx)
+    tensor_X = torch.from_numpy(X_scaled)
+    tensor_Y = torch.from_numpy(Y_scaled)
+    dataset = TensorDataset(tensor_X, tensor_Y)
+    loaders = make_loaders(dataset, train_idx, val_idx, test_idx, settings.batch_size)
+    criterion = nn.MSELoss()
+    if settings.head_names:
+        head_names = tuple(settings.head_names)
+    elif dataset_head_names:
+        head_names = tuple(dataset_head_names)
+    else:
+        head_names = tuple(f"head_{idx}" for idx in range(Y.shape[1]))
+    if len(head_names) != Y.shape[2]:
+        raise ValueError("Number of head names must match target dimension")
+    grid_tensor = torch.from_numpy(grid_norm).to(device)
+    model = build_model(
+        settings,
+        input_dim=X.shape[1],
+        output_dim=Y.shape[-1],
+        head_names=head_names,
+        trunk_input_dim=grid_tensor.shape[-1],
+    )
+    grid_info = {
+        "normalized": grid_norm.flatten().astype(float).tolist(),
+        "original": grid_raw.flatten().astype(float).tolist(),
+    }
+    scalers_serialized = {
+        "X": serialize_scaler(scaler_X),
+        "Y": serialize_scalers_list(scalers_y),
+    }
+    active_head_names: Optional[Sequence[str]] = head_names
+
+
     hyperparams = {
         "Batch size": settings.batch_size,
         "Parameter embedding dimension": settings.param_embedding_dim,
@@ -645,7 +621,7 @@ def run_training(settings: TrainSettings) -> Dict[str, Union[float, str, Dict[st
         "Patience": settings.patience,
         "Gradient clip": settings.grad_clip,
         "Output basis (n_basis)": settings.n_basis,
-        "Head names": settings.head_names,
+        "Head names": active_head_names,
         "Baseline alpha": settings.baseline_alpha,
     }
 
@@ -683,44 +659,27 @@ def run_training(settings: TrainSettings) -> Dict[str, Union[float, str, Dict[st
     val_preds = collect_predictions(model, val_eval_loader, device, grid_tensor)
     test_preds = collect_predictions(model, test_eval_loader, device, grid_tensor)
 
-    if settings.target == "rdc":
-        y_train = tensor_Y[train_idx].numpy()
-        y_val = tensor_Y[val_idx].numpy()
-        y_test = tensor_Y[test_idx].numpy()
-        train_true = inverse_scale_rdc(y_train, scalers_y)
-        val_true = inverse_scale_rdc(y_val, scalers_y)
-        test_true = inverse_scale_rdc(y_test, scalers_y)
-        train_pred = inverse_scale_rdc(train_preds, scalers_y)
-        val_pred = inverse_scale_rdc(val_preds, scalers_y)
-        test_pred = inverse_scale_rdc(test_preds, scalers_y)
-        per_head = {
-            "train": compute_per_head_metrics(train_true, train_pred, head_names),
-            "val": compute_per_head_metrics(val_true, val_pred, head_names),
-            "test": compute_per_head_metrics(test_true, test_pred, head_names),
-        }
-    else:
-        y_train = tensor_y[train_idx].numpy()
-        y_val = tensor_y[val_idx].numpy()
-        y_test = tensor_y[test_idx].numpy()
-        train_true = inverse_scale_leak(y_train, scaler_y)
-        val_true = inverse_scale_leak(y_val, scaler_y)
-        test_true = inverse_scale_leak(y_test, scaler_y)
-        train_pred = inverse_scale_leak(train_preds, scaler_y)
-        val_pred = inverse_scale_leak(val_preds, scaler_y)
-        test_pred = inverse_scale_leak(test_preds, scaler_y)
-        per_head = {}
-
-    metrics = {
-        "train": compute_metrics(train_true, train_pred),
-        "val": compute_metrics(val_true, val_pred),
-        "test": compute_metrics(test_true, test_pred),
+    y_train = tensor_Y[train_idx].numpy()
+    y_val = tensor_Y[val_idx].numpy()
+    y_test = tensor_Y[test_idx].numpy()
+    train_true = inverse_scale(y_train, scalers_y)
+    val_true = inverse_scale(y_val, scalers_y)
+    test_true = inverse_scale(y_test, scalers_y)
+    train_pred = inverse_scale(train_preds, scalers_y)
+    val_pred = inverse_scale(val_preds, scalers_y)
+    test_pred = inverse_scale(test_preds, scalers_y)
+    per_head = {
+        "train": compute_per_head_metrics(train_true, train_pred, head_names),
+        "val": compute_per_head_metrics(val_true, val_pred, head_names),
+        "test": compute_per_head_metrics(test_true, test_pred, head_names),
     }
+    
     if per_head:
         metrics["per_head"] = per_head
 
     out_dir = Path(settings.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    exp_name = settings.exp_name or f"{settings.model}_{settings.target}_{settings.mat_files[0]}"
+    exp_name = settings.exp_name or f"{settings.model}_{settings.mat_files[0]}"
     ckpt_path = out_dir / f"{exp_name}.pth"
 
     scalers_info = scalers_serialized
