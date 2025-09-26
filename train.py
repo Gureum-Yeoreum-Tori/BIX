@@ -202,18 +202,24 @@ def load_dataset(
         with h5py.File(path, "r") as mat:
             if "x" not in mat or "y" not in mat:
                 raise KeyError(f"Expected datasets 'x' and 'y' in {path}")
-
-            raw_X = np.array(mat["x"], dtype=np.float32).transpose([1,0]) # n_data, n_in
-            raw_Y = np.array(mat["y"], dtype=np.float32).transpose([3,1,2,0]) # n_data, n_grid1, n_grid2, n_out
-            gx = np.array(mat["grid"]["x"], dtype=np.float32) # n_grid1, n_grid2
-            gy = np.array(mat["grid"]["y"], dtype=np.float32) # n_grid1, n_grid2
-            grid = np.stack([gx, gy], axis=2)
+            raw_X = np.array(mat["x"], dtype=np.float32).transpose(1, 0)  # (n_samples, n_in)
+            raw_Y = np.array(mat["y"], dtype=np.float32).transpose(3, 1, 2, 0)  # (n_samples, g1, g2, n_out)
+            gx = np.array(mat["grid"]["x"], dtype=np.float32)  # (g1, g2)
+            gy = np.array(mat["grid"]["y"], dtype=np.float32)  # (g1, g2)
+            grid_candidate = np.stack([gx, gy], axis=2)  # (g1, g2, 2)
             
             if raw_X.shape[0] != raw_Y.shape[0]:
                 raise ValueError(
                     f"Sample dimension mismatch between x ({raw_X.shape}) and y ({raw_Y.shape}) in {path}"
                 )
-
+                
+            if gx.shape[0] != raw_Y.shape[1] and gx.shape[1] != raw_Y.shape[2]:
+                raise ValueError("Grid and data dimension mismatch.")
+            if grid is None:
+                grid = grid_candidate
+            else:
+                if grid.shape != grid_candidate.shape or not np.allclose(grid, grid_candidate):
+                    raise ValueError(f"Grid mismatch detected across datasets (first vs {path})")
             features.append(raw_X.astype(np.float32))
             targets.append(raw_Y.astype(np.float32))
 
@@ -232,8 +238,11 @@ def load_dataset(
 
     X = np.concatenate(features, axis=0)
     Y = np.concatenate(targets, axis=0)
-    grid = grid.reshape(-1, 2)
-    Y = Y.reshape(2000, -1, Y.shape[-1])
+    g1, g2, _ = grid.shape
+    grid = grid.reshape(g1 * g2, -1)  # (n_points, coord_dim)
+    n_samples = Y.shape[0]
+    n_outputs = Y.shape[-1]
+    Y = Y.reshape(n_samples, -1, n_outputs)  # (samples, n_points, n_outputs)
 
     return X, Y, grid, head_names
 

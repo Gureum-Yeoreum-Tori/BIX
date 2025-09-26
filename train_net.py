@@ -14,13 +14,11 @@ BEST_META_PATHS: Dict[str, Path] = {
     "deeponet": Path("net/optuna/deeponet/best/best_meta.json"),
 }
 
-DEFAULT_DATA_DIR = Path("dataset/data/tapered_seal")
+DEFAULT_DATA_DIR = Path("dataset/jb")
 DEFAULT_OUT_ROOT = Path("net") / "tuned_runs"
-DEFAULT_HEAD_NAMES = ("K", "k", "C", "c")
-DEFAULT_LEAK_INDEX = 6
-DEFAULT_RDC_INDICES = (2, 3, 4, 5)
 DEFAULT_PATIENCE = 200
 DEFAULT_SEED = 42
+DEFAULT_HEAD_NAMES = ("Kxx", "Kxy", "Kyx", "Kyy", "Cxx", "Cxy", "Cyx", "Cyy")
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +77,13 @@ def best_dataset_from_meta(meta: dict) -> str:
     return str(meta.get("mat_file", ""))
 
 
+def head_names_from_meta(meta: dict) -> Sequence[str]:
+    names = meta.get("head_names")
+    if isinstance(names, list) and names:
+        return tuple(str(name) for name in names)
+    return DEFAULT_HEAD_NAMES
+
+
 def extract_mlp_hidden_layers(params: dict) -> List[int]:
     n_layers = int(params.get("mlp_hidden_n_layers", 0))
     widths: List[int] = []
@@ -106,11 +111,8 @@ def build_mlp_settings(
     hidden_layers = extract_mlp_hidden_layers(params)
     settings = TrainSettings(
         model="mlp",
-        target="leak",
         data_dir=str(data_dir),
         mat_files=(dataset,),
-        leak_index=DEFAULT_LEAK_INDEX,
-        rdc_indices=DEFAULT_RDC_INDICES,
         batch_size=256,
         epochs=int(params.get("mlp_epochs", 3000)),
         lr=float(params["mlp_lr"]),
@@ -128,7 +130,7 @@ def build_mlp_settings(
         seed=DEFAULT_SEED,
         device=device,
         out_dir=str(out_root / "mlp"),
-        exp_name=f"mlp_leak_{dataset}_tuned",
+        exp_name=f"mlp_{dataset}_tuned",
         baseline_alpha=1.0,
         head_names=None,
         layernorm=bool(params.get("mlp_layernorm", False)),
@@ -148,11 +150,8 @@ def build_deeponet_settings(
     trunk_layers = extract_deeponet_layers(params, "trunk")
     settings = TrainSettings(
         model="deeponet",
-        target="rdc",
         data_dir=str(data_dir),
         mat_files=(dataset,),
-        leak_index=DEFAULT_LEAK_INDEX,
-        rdc_indices=DEFAULT_RDC_INDICES,
         batch_size=256,
         epochs=5000,
         lr=float(params["deeponet_lr"]),
@@ -172,7 +171,7 @@ def build_deeponet_settings(
         out_dir=str(out_root / "deeponet"),
         exp_name=f"deeponet_rdc_{dataset}_tuned",
         baseline_alpha=1.0,
-        head_names=DEFAULT_HEAD_NAMES,
+        head_names=head_names_from_meta(meta),
         layernorm=False,
     )
     return settings

@@ -8,7 +8,6 @@ from torch import Tensor, nn
 ACTIVATIONS: Dict[str, Callable[[], nn.Module]] = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
-    "tanh": nn.Tanh,
 }
 
 def count_parameters(module: torch.nn.Module) -> int:
@@ -144,7 +143,9 @@ class DeepONet(nn.Module):
         trunk_features = trunk_features.view(batch, n_points, self.latent_dim)
         branch_exp = branch_out.unsqueeze(2)
         trunk_exp = trunk_features.unsqueeze(1)
-        values = torch.sum(branch_exp * trunk_exp, dim=-1)
+        values = torch.einsum('bod,bnd->bno', branch_out, trunk_features)
+
+        # values = torch.sum(branch_exp * trunk_exp, dim=-1)
         return values
 
     def __repr__(self) -> str:

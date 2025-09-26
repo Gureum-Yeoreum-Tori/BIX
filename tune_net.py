@@ -28,6 +28,7 @@ MAT_FILES = (
 )
 TARGET = "rdc"
 # TARGET = "leak"
+HEAD_NAMES = ("K", "k", "C", "c")
 
 # Optuna configuration
 OPTUNA_SEED = 42
@@ -49,11 +50,9 @@ def create_base_settings(model_type: str) -> TrainSettings:
         target=TARGET,
         data_dir=DATA_DIR,
         mat_files=MAT_FILES,
-        leak_index=6,
-        rdc_indices=(2, 3, 4, 5),
         seed=OPTUNA_SEED,
         device=None,
-        head_names=None,
+        head_names=HEAD_NAMES if TARGET == "rdc" else None,
     )
 
     if model_type == "mlp":
