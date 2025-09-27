@@ -8,7 +8,7 @@ settings = TrainSettings(
     mat_files=("20250925_T_110633",),
     head_names=("Kxx", "Kxy", "Kyx", "Kyy", "Cxx", "Cxy", "Cyx", "Cyy",),
     seed=123,
-    epochs=1000,
+    epochs=500,
     batch_size=256,
     lr=1e-4,
 )

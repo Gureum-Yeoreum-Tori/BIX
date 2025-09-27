@@ -388,7 +388,7 @@ def compute_per_head_metrics(
     y_pred: np.ndarray,
     head_names: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, float]]:
-    n_heads = y_true.shape[1]
+    n_heads = y_true.shape[2]
     if head_names is not None:
         if len(head_names) != n_heads:
             raise ValueError("Number of head names must match number of heads")
@@ -399,8 +399,8 @@ def compute_per_head_metrics(
     per_head: Dict[str, Dict[str, float]] = {}
     for head, name in enumerate(names):
         metrics = compute_metrics(
-            y_true[:, head, :][:, :, None],
-            y_pred[:, head, :][:, :, None],
+            y_true[:, :, head][:, :, None],
+            y_pred[:, :, head][:, :, None],
         )
         per_head[name] = metrics
     return per_head
@@ -677,14 +677,19 @@ def run_training(settings: TrainSettings) -> Dict[str, Union[float, str, Dict[st
     train_pred = inverse_scale(train_preds, scalers_y)
     val_pred = inverse_scale(val_preds, scalers_y)
     test_pred = inverse_scale(test_preds, scalers_y)
-    per_head = {
+    
+    metrics = {
+        "train": compute_metrics(train_true, train_pred),
+        "val": compute_metrics(val_true, val_pred),
+        "test": compute_metrics(test_true, test_pred),
+    }
+    
+    per_head_metrics = {
         "train": compute_per_head_metrics(train_true, train_pred, head_names),
         "val": compute_per_head_metrics(val_true, val_pred, head_names),
         "test": compute_per_head_metrics(test_true, test_pred, head_names),
-    }
-    
-    if per_head:
-        metrics["per_head"] = per_head
+        }
+    metrics["per_head"] = per_head_metrics
 
     out_dir = Path(settings.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

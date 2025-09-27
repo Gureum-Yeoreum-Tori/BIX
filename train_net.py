@@ -1,5 +1,3 @@
-"""Train leak MLP and RDC DeepONet with tuned hyperparameters on arbitrary datasets."""
-
 from __future__ import annotations
 
 import argparse
