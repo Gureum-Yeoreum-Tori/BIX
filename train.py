@@ -1,4 +1,5 @@
 #%%
+# what is baseline alpha?
 import argparse
 import json
 import math
@@ -75,9 +76,9 @@ class TrainSettings:
     grad_clip: float = 0.0
     seed: int = 42
     device: Optional[str] = None
-    out_dir: str = "valid_net"
+    out_dir: str = "net"
     exp_name: Optional[str] = None
-    baseline_alpha: float = 1.0
+    # baseline_alpha: float = 1.0
     init: str = "xavier_uniform"
     layernorm: bool = False
 
@@ -123,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device")
     parser.add_argument("--out-dir")
     parser.add_argument("--exp-name")
-    parser.add_argument("--baseline-alpha", type=float)
+    # parser.add_argument("--baseline-alpha", type=float)
     parser.add_argument(
         "--head-names",
         nargs="*",
@@ -460,7 +461,7 @@ def build_settings(args: argparse.Namespace) -> TrainSettings:
         out_dir=args.out_dir or base.get("out_dir", "net"),
         exp_name=args.exp_name or base.get("exp_name", None),
 
-        baseline_alpha=args.baseline_alpha if args.baseline_alpha is not None else base.get("baseline_alpha", 1.0),
+        # baseline_alpha=args.baseline_alpha if args.baseline_alpha is not None else base.get("baseline_alpha", 1.0),
         head_names=(
             tuple(args.head_names)
             if args.head_names not in (None, [])
@@ -631,7 +632,7 @@ def run_training(settings: TrainSettings) -> Dict[str, Union[float, str, Dict[st
         "Gradient clip": settings.grad_clip,
         "Output basis (n_basis)": settings.n_basis,
         "Head names": active_head_names,
-        "Baseline alpha": settings.baseline_alpha,
+        # "Baseline alpha": settings.baseline_alpha,
     }
 
     print(json.dumps(hyperparams, indent=2))

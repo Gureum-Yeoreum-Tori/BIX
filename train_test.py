@@ -5,12 +5,15 @@ from train import TrainSettings, run_training
 settings = TrainSettings(
     model="deeponet",
     data_dir="dataset/jb",
-    mat_files=("20250925_T_110633",),
-    head_names=("Kxx", "Kxy", "Kyx", "Kyy", "Cxx", "Cxy", "Cyx", "Cyy",),
+    # mat_files=("20250925_T_110633",),
+    # head_names=("Kxx", "Kxy", "Kyx", "Kyy", "Cxx", "Cxy", "Cyx", "Cyy",),
+    mat_files=("only_k_xx",),
+    head_names=("Kxx",),
     seed=123,
     epochs=500,
     batch_size=256,
     lr=1e-4,
+    exp_name="single_head"
 )
 
 result = run_training(settings)
